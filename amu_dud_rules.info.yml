@@ -1,0 +1,5 @@
+name: AMU DUD RULES
+type: module
+description: workflow actions rules for dud ( emails on state change )
+core: 8.x
+package: AMU
