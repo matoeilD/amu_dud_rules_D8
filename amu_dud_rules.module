@@ -2,6 +2,149 @@
 
 
 /**
+ * @author m.dandonneau
+ *
+ * Send email to DOSI members on article creation and modification depending on
+ *   content moderation state *
+ *
+ * @param \Drupal\Core\Entity\EntityInterface $entity
+ */
+function amu_dud_rules_entity_presave(Drupal\Core\Entity\EntityInterface $entity) {
+
+  if ($entity->getEntityTypeId() !== 'content_moderation_state') {
+    return;
+  }
+
+  $article_id = $entity->get('content_entity_id')->getString();
+  $article = \Drupal\node\Entity\Node::load($article_id);
+  if ($article->bundle() !== 'article') {
+    return;
+  }
+
+  global $base_url;
+
+  $article_title = $article->get('title')->getString();
+  $article_url = $base_url . "/node/" . $article->get('nid')->getString();
+
+  $author_name = $article->getOwner()->get('field_cn_ldap')->getString();
+  $author_email = $article->getOwner()->getEmail();
+  $current_user_uid = \Drupal::currentUser()->id();
+  $current_user_name = \Drupal\user\Entity\User::load($current_user_uid) ->get('field_cn_ldap') ->getString();
+  $is_author=($current_user_name == $author_name);
+
+  //retrieve all rédacteur en chef
+  $query = \Drupal::entityQuery('user');
+  $uids = $query->execute();
+  foreach ($uids as $uid) {
+    $user = \Drupal\user\Entity\User::load($uid);
+    if ($user->hasRole('redacteur_en_chef')) {
+      $emails_redacteur_en_chef[] = $user->getEmail();
+    }
+  }
+  $emails_redacteur_en_chef = implode(',', $emails_redacteur_en_chef);
+
+
+  $moderation_state = $entity->get('moderation_state')->getString();
+  $moderation_state_original = '';
+  if ($entity->original) {
+    $moderation_state_original = $entity->original->get('moderation_state') ->getString();
+  }
+  $is_transition_change=($moderation_state !== $moderation_state_original);
+
+  include 'includes/notification/messages.php';
+  include 'includes/notification/titles.php';
+  $send_to = $author_email;
+  $params['node_title'] = $title_mod;
+  $params['message'] = $message_same_state;
+  $send = FALSE;
+
+  switch ($moderation_state) {
+    case 'draft':
+      if (!$is_transition_change && !$is_author) {
+          $send = TRUE;
+      }
+      break;
+
+    case 'propose_a_la_relecture':
+      if (!$is_transition_change && !$is_author) {
+          $send = TRUE;
+      }
+      elseif ($is_transition_change){
+        //TODO replace with dosi list
+        $send_to = "mathieu.dandonneau@univ-amu.fr";
+        $params['node_title'] = $title_prop;
+        $params['message'] = $message_prop;
+        $send = TRUE;
+      }
+      break;
+
+    case 'relecture_1_ok':
+      if (!$is_transition_change && !$is_author) {
+          $send = TRUE;
+      }
+      elseif ($is_transition_change){
+        //TODO replace with dosi list
+        $send_to = "mathieu.dandonneau@univ-amu.fr";
+        $params['node_title'] = $title_relec1;
+        $params['message'] = $message_relec1;
+        $send = TRUE;
+      }
+      break;
+
+    case 'relecture_2_ok':
+      $send_to = $emails_redacteur_en_chef;
+      $params['node_title'] = $title_relec2;
+      $params['message'] = $message_relec2;
+      $send = TRUE;
+      break;
+
+    case 'published':
+      if (!$is_transition_change) {
+        $send_to .= ',';
+        $send_to .= $emails_redacteur_en_chef;
+        $send = TRUE;
+      }
+      else {
+        //TODO replace with dosi list
+        $send_to = "mathieu.dandonneau@univ-amu.fr";
+        $params['node_title'] = $title_pub;
+        $params['message'] = $message_pub;
+        $send = TRUE;
+      }
+      break;
+
+    case 'mise_a_jour_necessaire':
+      //TODO replace with dosi list
+      $send_to = "mathieu.dandonneau@univ-amu.fr";
+      $params['node_title'] = $title_maj;
+      $params['message'] = $message_maj;
+      $send = TRUE;
+      break;
+
+    default:
+      break;
+  }
+
+  if ($send) {
+    $mailManager = \Drupal::service('plugin.manager.mail');
+    $module = "amu_dud_rules";
+    $key = 'state_changed_action';
+    $to = $send_to;
+
+    $langcode = \Drupal::currentUser()->getPreferredLangcode();
+
+    $result = $mailManager->mail($module, $key, $to, $langcode, $params, NULL, $send);
+
+    if ($result['result'] !== TRUE) {
+      drupal_set_message(t('There was a problem sending notifications.'), 'error');
+    }
+    else {
+      drupal_set_message(t("A notification has been sent to $to"));
+    }
+  }
+}
+
+/**
  * Implements hook_mail().
  */
 function amu_dud_rules_mail($key, &$message, $params) {
@@ -14,325 +157,5 @@ function amu_dud_rules_mail($key, &$message, $params) {
       $message['subject'] = t('@title', ['@title' => $params['node_title']], $options);
       $message['body'][] = $params['message'];
       break;
-  }
-}
-
-/**
- * @author m.dandonneau
- *
- * send email to DOSI members on article creation and modification depending on
- *   content moderation state
- *
- * TODO query refactor
- *
- * @param \Drupal\Core\Entity\EntityInterface $entity
- */
-function amu_dud_rules_entity_presave(Drupal\Core\Entity\EntityInterface $entity) {
-  if ($entity->getEntityTypeId() !== 'content_moderation_state') {
-    return;
-  }
-  $send = TRUE;
-  $article_id = $entity->get('content_entity_id')->getString();
-  $article = \Drupal\node\Entity\Node::load($article_id);
-
-  if ($article->bundle() == 'article') {
-    global $base_url;
-    $author_name = $article->getOwner()->get('field_cn_ldap')->getString();
-    $author_email = $article->getOwner()->getEmail();
-    // $current_user_name=\Drupal::currentUser()->getDisplayName();
-    $current_user_uid = \Drupal::currentUser()->id();
-    $current_user_name = \Drupal\user\Entity\User::load($current_user_uid)
-      ->get('field_cn_ldap')
-      ->getString();
-    $moderation_state = $entity->get('moderation_state')->getString();
-
-    if ($entity->original) {
-      $moderation_state_original = $entity->original->get('moderation_state')
-        ->getString();
-    }
-    else {
-      $moderation_state_original = '';
-    }
-
-    switch ($moderation_state) {
-      case 'draft':
-        if ($moderation_state_original == 'draft') {
-          if ($current_user_name != $author_name) {
-
-            //Envoi à l'auteur
-            $send_to = $author_email;
-
-            $params['node_title'] = '[DUD] Modifications de ' . $current_user_name . ' pour l\'article ' . $article->label() . ' de ' . $author_name;
-            $params['message'] = $current_user_name . " vient de modifier l'article " . $article->get('title')
-                ->getString() . " sans changer son état. Allez vite voir...\n";
-            $params['message'] .= "C'est là: " . $base_url . "/node/" . $article->get('nid')
-                ->getString() . "\n";
-            $params['message'] .= "A Bientôt, \n";
-            $params['message'] .= "Le Dioude.";
-            break;
-
-          }
-          else {
-            //pas d'envoi d'e-mails
-            $params['node_title'] = '';
-            $params['message'] = '';
-            $send = FALSE;
-            break;
-          }
-        }
-        else {
-          //pas d'envoi d'e-mails
-          $params['node_title'] = '';
-          $params['message'] = '';
-          $send = FALSE;
-          break;
-        }
-
-        break;
-      case 'propose_a_la_relecture':
-
-        if ($moderation_state_original == 'propose_a_la_relecture') {
-          if ($current_user_name != $author_name) {
-            //Envoi à l'auteur
-            $send_to = $author_email;
-
-            $params['node_title'] = '[DUD] Modifications de ' . $current_user_name . ' pour l\'article ' . $article->label() . ' de ' . $author_name;
-            $params['message'] = $current_user_name . " vient de modifier l'article " . $article->get('title')
-                ->getString() . " sans changer son état. Allez vite voir...\n";
-            $params['message'] .= "C'est là: " . $base_url . "/node/" . $article->get('nid')
-                ->getString() . "\n";
-            $params['message'] .= "A Bientôt, \n";
-            $params['message'] .= "Le Dioude.";
-            break;
-          }
-          else {
-            //pas d'envoi d'e-mails
-            $params['node_title'] = '';
-            $params['message'] = '';
-            $send = FALSE;
-            break;
-          }
-        }
-        else {
-
-          //TODO replace with dosi list
-          //retrieve all dosi members
-
-          $send_to = "gerard.milhaud@univ-amu.fr";
-
-          $params['node_title'] = '[DUD] Nouvel article proposé à la publication par ' . $author_name . ': ' . $article->label();
-          $params['message'] = "L'article " . $article->get('title')
-              ->getString();
-          $params['message'] .= " vient d'être proposé à la publication par " . $author_name . ".\n";
-          $params['message'] .= "Qu'il en soit remercié pour le temps qu'il contribue ainsi à faire gagner à ses collègues et à tous les AMUsagers.\n";
-          $params['message'] .= "N'hésitez pas à faire avancer le workflow en assurant une relecture.\n";
-          $params['message'] .= "Un petit pas pour la DOSI, mais à coup sûr un grand pas pour la qualité du service public français.\n";
-          $params['message'] .= "C'est là: " . $base_url . "/node/" . $article->get('nid')
-              ->getString() . "\n";
-          $params['message'] .= "Le Dioude.";
-          break;
-        }
-
-      case 'relecture_1_ok':
-        if ($moderation_state_original == 'relecture_1_ok') {
-          if ($current_user_name != $author_name) {
-            //Envoi à l'auteur
-            $send_to = $author_email;
-
-            $params['node_title'] = '[DUD] Modifications de ' . $current_user_name . ' pour l\'article ' . $article->label() . ' de ' . $author_name;
-            $params['message'] = $current_user_name . " vient de modifier l'article " . $article->get('title')
-                ->getString() . " sans changer son état. Allez vite voir...\n";
-            $params['message'] .= "C'est là: " . $base_url . "/node/" . $article->get('nid')
-                ->getString() . "\n";
-            $params['message'] .= "A Bientôt, \n";
-            $params['message'] .= "Le Dioude.";
-            break;
-          }
-          else {
-            //pas d'envoi d'e-mails
-            $params['node_title'] = '';
-            $params['message'] = '';
-            $send = FALSE;
-            break;
-          }
-        }
-        else {
-
-
-          //TODO replace with dosi list
-          $send_to = "gerard.milhaud@univ-amu.fr";
-
-          $params['node_title'] = '[DUD] Relecture 1 validée pour l\'article ' . $article->label() . " de " . $author_name;
-          $params['message'] = "L'article " . $article->get('title')
-              ->getString() . " de " . $author_name . " vient d'être passé dans l'état Relecture 1 ok par le relecteur " . $current_user_name;
-          $params['message'] .= "\nC'est là: " . $base_url . "/node/" . $article->get('nid')
-              ->getString() . "\n";
-          $params['message'] .= "Merci de poursuivre l'effort en assurant la 2eme relecture, dernière étape avant publication.\n";
-          $params['message'] .= "Le Dioude.";
-          break;
-        }
-
-      case 'relecture_2_ok':
-        //REMOVED l'auteur ne peut etre le relecteur
-        // $author=$article->getOwner();
-        // $current_user=\Drupal::currentUser();
-        //drupal_set_message(t('l\'auteur ne peut etre le relecteur.'), 'error');
-        //$entity= $entity->original;
-
-        //$url = $base_url.\Drupal::service('path.current')->getPath();
-        //$response = new Symfony\Component\HttpFoundation\RedirectResponse($url);
-        //$response->send();
-        //return;
-        if ($moderation_state_original == 'relecture_2_ok') {
-          if ($current_user_name != $author_name) {
-            //Envoi à l'auteur
-            $send_to = $author_email;
-
-            $params['node_title'] = '[DUD] Modifications de ' . $current_user_name . ' pour l\'article ' . $article->label() . ' de ' . $author_name;
-            $params['message'] = $current_user_name . " vient de modifier l'article " . $article->get('title')
-                ->getString() . " sans changer son état. Allez vite voir...\n";
-            $params['message'] .= "C'est là: " . $base_url . "/node/" . $article->get('nid')
-                ->getString() . "\n";
-            $params['message'] .= "A Bientôt, \n";
-            $params['message'] .= "Le Dioude.";
-            break;
-          }
-          else {
-            //pas d'envoi d'e-mails
-            $params['node_title'] = '';
-            $params['message'] = '';
-            $send = FALSE;
-            break;
-          }
-        }
-        else {
-          //retrieve all rédacteur en chef
-          $query = \Drupal::entityQuery('user');
-          $nids = $query->execute();
-          foreach ($nids as $nid) {
-            $user = \Drupal\user\Entity\User::load($nid);
-            if ($user->hasRole('redacteur_en_chef')) {
-              $emails_redacteur_en_chef[] = $user->getEmail();
-            }
-          }
-          $send_to = implode(',', $emails_redacteur_en_chef);
-
-          $params['node_title'] = '[DUD] Relecture 2 ok pour l\'article ' . $article->label() . " de " . $author_name;
-          $params['message'] = "L'article " . $article->get('title')
-              ->getString() . " de " . $author_name . " vient d'être passé dans l'état Relecture 2 ok par le relecteur " . $current_user_name;
-          $params['message'] .= "\nC'est là: " . $base_url . "/node/" . $article->get('nid')
-              ->getString() . "\n";
-          $params['message'] .= "El Dioudolo.";
-          break;
-        }
-
-      case 'published':
-        //TODO depuis 8.4 il semblerait qu'un contenu publié ou set as defaut revision n'a plus de state_original
-        if ($moderation_state_original == 'published') {
-          //print($current_user_name);
-          //print($author_name);
-          //die();
-          if ($current_user_name != $author_name) {
-
-            //retrieve all rédacteur en chef
-            $query = \Drupal::entityQuery('user');
-            $nids = $query->execute();
-            foreach ($nids as $nid) {
-              $user = \Drupal\user\Entity\User::load($nid);
-              if ($user->hasRole('redacteur_en_chef')) {
-                $emails_redacteur_en_chef[] = $user->getEmail();
-              }
-            }
-            $send_to = implode(',', $emails_redacteur_en_chef);
-            $send_to .= ',';
-            $send_to .= $author_email;
-
-
-            $params['node_title'] = '[DUD] Modifications de ' . $current_user_name . ' pour l\'article ' . $article->label() . ' de ' . $author_name;
-            $params['message'] = $current_user_name . " vient de modifier l'article " . $article->get('title')
-                ->getString() . " sans changer son état. Allez vite voir...\n";
-            $params['message'] .= "C'est là: " . $base_url . "/node/" . $article->get('nid')
-                ->getString() . "\n";
-            $params['message'] .= "A Bientôt, \n";
-            $params['message'] .= "Le Dioude.";
-            break;
-          }
-          else {
-            //retrieve all rédacteur en chef
-            $query = \Drupal::entityQuery('user');
-            $nids = $query->execute();
-            foreach ($nids as $nid) {
-              $user = \Drupal\user\Entity\User::load($nid);
-              if ($user->hasRole('redacteur_en_chef')) {
-                $emails_redacteur_en_chef[] = $user->getEmail();
-              }
-            }
-            $send_to = implode(',', $emails_redacteur_en_chef);
-
-            $params['node_title'] = '[DUD] Modifications de ' . $current_user_name . ' pour l\'article ' . $article->label() . ' de ' . $author_name;
-            $params['message'] = $current_user_name . " vient de modifier l'article " . $article->get('title')
-                ->getString() . " sans changer son état. Allez vite voir...\n";
-            $params['message'] .= "C'est là: " . $base_url . "/node/" . $article->get('nid')
-                ->getString() . "\n";
-            $params['message'] .= "A Bientôt, \n";
-            $params['message'] .= "Le Dioude.";
-            break;
-          }
-        }
-        else {
-          // $send_to=$article->getOwner()->getEmail();
-          //TODO replace with dosi list
-          $send_to = "gerard.milhaud@univ-amu.fr";
-
-          $params['node_title'] = '[DUD] Nouvel article publié par ' . $author_name . ": " . $article->label();
-          $params['message'] = "L'article " . $article->get('title')
-              ->getString() . " de" . $author_name . " vient d'être publié.\n";
-          $params['message'] = "Un grand merci collectif à l'auteur: " . $author_name . ". La DOSI l'aime. Ses colllègues l'aiment. AMU entière l'aime. Gloire à toi " . $author_name . " !!!";
-          $params['message'] .= "\nPrécipitez-vous: " . $base_url . "/node/" . $article->get('nid')
-              ->getString() . "\n";
-          $params['message'] .= "Merci à tous pour votre participation. \n";
-          $params['message'] .= "Le Dioude.";
-          break;
-        }
-
-      case 'mise_a_jour_necessaire':
-        //TODO replace with dosi list
-        $send_to = "gerard.milhaud@univ-amu.fr";
-
-        $params['node_title'] = '[DUD] Mise à jour souhaitée pour: ' . $article->label();
-        $params['message'] = "L'article " . $article->get('title')->getString();
-        $params['message'] .= " crée par " . $author_name . " ";
-        $params['message'] .= "nécessite une mise à jour. \nUn cycle de relecture est nécessaire avant sa remise en publication:\n";
-        $params['message'] .= "C'est là: " . $base_url . "/node/" . $article->get('nid')
-            ->getString() . "\n";
-        $params['message'] .= "A Bientôt, \n";
-        $params['message'] .= "Le Dioude.";
-        break;
-
-      default:
-        //pas d'envoi d'e-mails
-        $params['node_title'] = '';
-        $params['message'] = '';
-        $send = FALSE;
-        break;
-    }
-
-    if ($send) {
-      $mailManager = \Drupal::service('plugin.manager.mail');
-      $module = "amu_dud_rules";
-      $key = 'state_changed_action';
-      $to = $send_to;
-      //$to = \Drupal::currentUser()->getEmail();
-      $langcode = \Drupal::currentUser()->getPreferredLangcode();
-
-      $result = $mailManager->mail($module, $key, $to, $langcode, $params, NULL, $send);
-
-      if ($result['result'] !== TRUE) {
-        drupal_set_message(t('There was a problem sending notifications.'), 'error');
-      }
-      else {
-        drupal_set_message(t("A notification has been sent to $to"));
-      }
-    }
   }
 }
