@@ -10,7 +10,6 @@
  * @param \Drupal\Core\Entity\EntityInterface $entity
  */
 function amu_dud_rules_entity_presave(Drupal\Core\Entity\EntityInterface $entity) {
-
   if ($entity->getEntityTypeId() !== 'content_moderation_state') {
     return;
   }
@@ -42,8 +41,7 @@ function amu_dud_rules_entity_presave(Drupal\Core\Entity\EntityInterface $entity
     }
   }
   $emails_redacteur_en_chef = implode(',', $emails_redacteur_en_chef);
-
-
+  
   $moderation_state = $entity->get('moderation_state')->getString();
   $moderation_state_original = '';
   if ($entity->original) {
